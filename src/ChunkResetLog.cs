@@ -30,39 +30,46 @@ namespace MaxChunkAgeDeadlockFix
 
         private static void Postfix(ICollection<long> _chunks)
         {
-            int count = _chunks?.Count ?? 0;
-            if (count == 0)
+            try
             {
-                return;
-            }
-
-            Interlocked.Increment(ref Diagnostics.ResetBatches);
-            Interlocked.Add(ref Diagnostics.ChunksReset, count);
-            Interlocked.Exchange(ref Diagnostics.LastResetTicks, DateTime.UtcNow.Ticks);
-
-            StringBuilder sb = new StringBuilder(64 + count * 14);
-            sb.Append("[MaxChunkAgeDeadlockFix] ");
-            sb.Append(CullExpiredChunksMarker.Active
-                ? "Chunk reset (MaxChunkAge/requested): "
-                : "Chunk removal (manual/space): ");
-            sb.Append(count).Append(" chunk(s), world XZ:");
-
-            int listed = 0;
-            foreach (long key in _chunks)
-            {
-                if (listed >= MaxListed)
+                int count = _chunks?.Count ?? 0;
+                if (count == 0)
                 {
-                    sb.Append(" +").Append(count - listed).Append(" more");
-                    break;
+                    return;
                 }
 
-                sb.Append(" (").Append(WorldChunkCache.extractX(key) << 4).Append(',')
-                    .Append(WorldChunkCache.extractZ(key) << 4)
-                    .Append(')');
-                listed++;
-            }
+                Interlocked.Increment(ref Diagnostics.ResetBatches);
+                Interlocked.Add(ref Diagnostics.ChunksReset, count);
+                Interlocked.Exchange(ref Diagnostics.LastResetTicks, DateTime.UtcNow.Ticks);
 
-            Log.Out(sb.ToString());
+                StringBuilder sb = new StringBuilder(64 + Math.Min(count, MaxListed) * 14);
+                sb.Append("[MaxChunkAgeDeadlockFix] ");
+                sb.Append(CullExpiredChunksMarker.Active
+                    ? "Chunk reset (MaxChunkAge/requested): "
+                    : "Chunk removal (manual/space): ");
+                sb.Append(count).Append(" chunk(s), world XZ:");
+
+                int listed = 0;
+                foreach (long key in _chunks)
+                {
+                    if (listed >= MaxListed)
+                    {
+                        sb.Append(" +").Append(count - listed).Append(" more");
+                        break;
+                    }
+
+                    sb.Append(" (").Append(WorldChunkCache.extractX(key) << 4).Append(',')
+                        .Append(WorldChunkCache.extractZ(key) << 4)
+                        .Append(')');
+                    listed++;
+                }
+
+                Log.Out(sb.ToString());
+            }
+            catch (Exception e)
+            {
+                Failsafe.Report("RemoveChunksLogPatch.Postfix", e);
+            }
         }
     }
 }

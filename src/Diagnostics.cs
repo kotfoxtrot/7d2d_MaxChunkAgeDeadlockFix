@@ -31,6 +31,10 @@ namespace MaxChunkAgeDeadlockFix
 
         public static int VolumeResetInProgress;
 
+        public static long ReservedSectorRejections;
+
+        public static long StaleReservedSectorEntries;
+
         public static string Describe(double stalledSeconds, long mainTicks)
         {
             long now = DateTime.UtcNow.Ticks;
@@ -48,6 +52,9 @@ namespace MaxChunkAgeDeadlockFix
                 + " | groupingDefers queued=" + Interlocked.Read(ref GroupingDefersQueued)
                 + " run=" + Interlocked.Read(ref GroupingDefersRun)
                 + " pending=" + Deferred.PendingGroupingCount
+                + " | reservedSectorRejections=" + Interlocked.Read(ref ReservedSectorRejections)
+                + " staleReservedEntries=" + Interlocked.Read(ref StaleReservedSectorEntries)
+                + " | failsafeHits=" + Interlocked.Read(ref Failsafe.Total)
                 + " | sinceLastReset=" + Age(now, Interlocked.Read(ref LastResetTicks))
                 + " sinceLastVolumeDeferRun=" + Age(now, Interlocked.Read(ref LastVolumeDeferRunTicks))
                 + " sinceLastDeferDrain=" + Age(now, Interlocked.Read(ref LastDeferDrainTicks));

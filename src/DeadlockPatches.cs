@@ -15,28 +15,53 @@ namespace MaxChunkAgeDeadlockFix
 
         private static bool Prefix(object ___lockObj, ref bool __state)
         {
-            __state = Monitor.TryEnter(___lockObj, 0);
-            if (!__state)
-            {
-                Interlocked.Increment(ref Diagnostics.CullSkips);
-                int total = Interlocked.Increment(ref skipCount);
-                long now = DateTime.UtcNow.Ticks;
-                long last = Interlocked.Read(ref lastLogTicks);
-                if (now - last > 30 * TimeSpan.TicksPerSecond
-                    && Interlocked.CompareExchange(ref lastLogTicks, now, last) == last)
-                {
-                    Debug.Log("[MaxChunkAgeDeadlockFix] CullChunklessData skipped under lock contention, deadlock avoided. Total skips: " + total);
-                }
-            }
+            __state = false;
 
-            return __state;
+            try
+            {
+                if (___lockObj == null)
+                {
+                    return true;
+                }
+
+                __state = Monitor.TryEnter(___lockObj, 0);
+                if (!__state)
+                {
+                    Interlocked.Increment(ref Diagnostics.CullSkips);
+                    int total = Interlocked.Increment(ref skipCount);
+                    long now = DateTime.UtcNow.Ticks;
+                    long last = Interlocked.Read(ref lastLogTicks);
+                    if (now - last > 30 * TimeSpan.TicksPerSecond
+                        && Interlocked.CompareExchange(ref lastLogTicks, now, last) == last)
+                    {
+                        Debug.Log("[MaxChunkAgeDeadlockFix] CullChunklessData skipped under lock contention, deadlock avoided. Total skips: " + total);
+                    }
+                }
+
+                return __state;
+            }
+            catch (Exception e)
+            {
+                Failsafe.Report("CullChunklessDataPatch.Prefix", e);
+                __state = false;
+                return true;
+            }
         }
 
         private static void Finalizer(object ___lockObj, bool __state)
         {
-            if (__state)
+            if (!__state || ___lockObj == null)
+            {
+                return;
+            }
+
+            try
             {
                 Monitor.Exit(___lockObj);
+            }
+            catch (Exception e)
+            {
+                Failsafe.Report("CullChunklessDataPatch.Finalizer", e);
             }
         }
     }
@@ -77,6 +102,11 @@ namespace MaxChunkAgeDeadlockFix
         {
             lock (gate)
             {
+                if (pendingStability.Count >= HardCap)
+                {
+                    return;
+                }
+
                 if (!pendingStability.Add(chunkPos))
                 {
                     return;
@@ -124,7 +154,7 @@ namespace MaxChunkAgeDeadlockFix
             }
             catch (Exception e)
             {
-                Log.Warning("[MaxChunkAgeDeadlockFix] Deferred drain failed: " + e);
+                Failsafe.Report("Deferred.DrainMainThread", e);
             }
         }
 
@@ -143,13 +173,14 @@ namespace MaxChunkAgeDeadlockFix
             }
 
             MultiBlockManager instance = MultiBlockManager.Instance;
-            if (instance == null || !instance.CheckFeatures(MultiBlockManager.FeatureFlags.OversizedStability))
+            if (instance == null
+                || !instance.CheckFeatures(MultiBlockManager.FeatureFlags.OversizedStability | MultiBlockManager.FeatureFlags.TerrainAlignment, MultiBlockManager.FeatureRequirement.OneOrMoreEnabled))
             {
                 stabilityScratch.Clear();
                 return;
             }
 
-            if (!Monitor.TryEnter(instance.lockObj, DrainLockTimeoutMs))
+            if (instance.lockObj == null || !Monitor.TryEnter(instance.lockObj, DrainLockTimeoutMs))
             {
                 RequeueStability();
                 return;
@@ -157,9 +188,20 @@ namespace MaxChunkAgeDeadlockFix
 
             try
             {
+                bool oversized = instance.CheckFeatures(MultiBlockManager.FeatureFlags.OversizedStability);
+                bool alignment = instance.CheckFeatures(MultiBlockManager.FeatureFlags.TerrainAlignment);
+
                 for (int i = 0; i < stabilityScratch.Count; i++)
                 {
-                    MultiBlockManager.AddChunkOverlappingBlocksToSet(stabilityScratch[i], instance.trackedDataMap.OversizedBlocks, instance.oversizedBlocksWithDirtyStability);
+                    if (oversized)
+                    {
+                        MultiBlockManager.AddChunkOverlappingBlocksToSet(stabilityScratch[i], instance.trackedDataMap.OversizedBlocks, instance.oversizedBlocksWithDirtyStability);
+                    }
+
+                    if (alignment)
+                    {
+                        MultiBlockManager.AddChunkOverlappingBlocksToSet(stabilityScratch[i], instance.trackedDataMap.TerrainAlignedBlocks, instance.blocksWithDirtyAlignment);
+                    }
                 }
 
                 Interlocked.Add(ref Diagnostics.StabilityDefersRun, stabilityScratch.Count);
@@ -206,22 +248,41 @@ namespace MaxChunkAgeDeadlockFix
                 for (; i < groupingScratch.Count; i++)
                 {
                     GroupingEntry entry = groupingScratch[i];
-                    object chunksInSaveDir = entry.Manager.chunksInSaveDir;
-                    if (chunksInSaveDir == null || !Monitor.TryEnter(chunksInSaveDir, DrainLockTimeoutMs))
+                    RegionFileManager manager = entry.Manager;
+                    object saveLock = manager != null ? manager.saveLock : null;
+                    object chunksInSaveDir = manager != null ? manager.chunksInSaveDir : null;
+                    if (saveLock == null || chunksInSaveDir == null)
+                    {
+                        break;
+                    }
+
+                    if (!Monitor.TryEnter(saveLock, DrainLockTimeoutMs))
                     {
                         break;
                     }
 
                     try
                     {
-                        BypassGrouping = true;
-                        entry.Manager.AddGroupedChunks(entry.Keys);
-                        ran++;
+                        if (!Monitor.TryEnter(chunksInSaveDir, DrainLockTimeoutMs))
+                        {
+                            break;
+                        }
+
+                        try
+                        {
+                            BypassGrouping = true;
+                            manager.AddGroupedChunks(entry.Keys);
+                            ran++;
+                        }
+                        finally
+                        {
+                            BypassGrouping = false;
+                            Monitor.Exit(chunksInSaveDir);
+                        }
                     }
                     finally
                     {
-                        BypassGrouping = false;
-                        Monitor.Exit(chunksInSaveDir);
+                        Monitor.Exit(saveLock);
                     }
                 }
             }
@@ -306,40 +367,60 @@ namespace MaxChunkAgeDeadlockFix
     {
         private static bool Prefix(RegionFileManager __instance, ICollection<long> chunksToGroup, ref bool __state)
         {
-            if (Deferred.BypassGrouping)
+            __state = false;
+
+            try
             {
+                if (Deferred.BypassGrouping)
+                {
+                    return true;
+                }
+
+                if (chunksToGroup == null || chunksToGroup.Count == 0)
+                {
+                    return true;
+                }
+
+                object chunksInSaveDir = __instance.chunksInSaveDir;
+                if (chunksInSaveDir == null)
+                {
+                    return true;
+                }
+
+                __state = Monitor.TryEnter(chunksInSaveDir, 0);
+                if (__state)
+                {
+                    return true;
+                }
+
+                return !Deferred.TryQueueGrouping(__instance, chunksToGroup);
+            }
+            catch (Exception e)
+            {
+                Failsafe.Report("GroupedChunksDeferPatch.Prefix", e);
+                __state = false;
                 return true;
             }
-
-            if (chunksToGroup == null || chunksToGroup.Count == 0)
-            {
-                return true;
-            }
-
-            object chunksInSaveDir = __instance.chunksInSaveDir;
-            if (chunksInSaveDir == null)
-            {
-                return true;
-            }
-
-            __state = Monitor.TryEnter(chunksInSaveDir, 0);
-            if (__state)
-            {
-                return true;
-            }
-
-            return !Deferred.TryQueueGrouping(__instance, chunksToGroup);
         }
 
         private static void Finalizer(RegionFileManager __instance, bool __state)
         {
-            if (__state)
+            if (!__state)
+            {
+                return;
+            }
+
+            try
             {
                 object chunksInSaveDir = __instance.chunksInSaveDir;
                 if (chunksInSaveDir != null)
                 {
                     Monitor.Exit(chunksInSaveDir);
                 }
+            }
+            catch (Exception e)
+            {
+                Failsafe.Report("GroupedChunksDeferPatch.Finalizer", e);
             }
         }
     }
@@ -349,80 +430,125 @@ namespace MaxChunkAgeDeadlockFix
     {
         private static bool Prefix(ICollection<long> _chunks)
         {
-            if (ThreadManager.IsMainThread())
+            try
             {
-                return true;
-            }
+                if (ThreadManager.IsMainThread())
+                {
+                    return true;
+                }
 
-            if (_chunks == null || _chunks.Count == 0)
-            {
+                if (_chunks == null || _chunks.Count == 0)
+                {
+                    return false;
+                }
+
+                long[] copy = new long[_chunks.Count];
+                _chunks.CopyTo(copy, 0);
+
+                Interlocked.Increment(ref Diagnostics.VolumeDefersQueued);
+
+                ThreadManager.AddSingleTaskMainThread("MaxChunkAgeDeadlockFix.ResetVolumes", RunVolumeReset, copy);
+
                 return false;
             }
-
-            long[] copy = new long[_chunks.Count];
-            _chunks.CopyTo(copy, 0);
-
-            Interlocked.Increment(ref Diagnostics.VolumeDefersQueued);
-
-            ThreadManager.AddSingleTaskMainThread("MaxChunkAgeDeadlockFix.ResetVolumes", () =>
+            catch (Exception e)
             {
-                Interlocked.Exchange(ref Diagnostics.VolumeResetInProgress, 1);
-                try
-                {
-                    World world = GameManager.Instance != null ? GameManager.Instance.World : null;
-                    if (world == null)
-                    {
-                        return;
-                    }
+                Failsafe.Report("ResetVolumeDataPatch.Prefix", e);
+                return true;
+            }
+        }
 
-                    for (int i = 0; i < copy.Length; i++)
-                    {
-                        world.ResetTriggerVolumes(copy[i]);
-                        world.ResetSleeperVolumes(copy[i]);
-                    }
-                }
-                finally
-                {
-                    Interlocked.Exchange(ref Diagnostics.VolumeResetInProgress, 0);
-                    Interlocked.Increment(ref Diagnostics.VolumeDefersRun);
-                    Interlocked.Exchange(ref Diagnostics.LastVolumeDeferRunTicks, DateTime.UtcNow.Ticks);
-                }
-            });
+        private static void RunVolumeReset(object _parameter)
+        {
+            long[] keys = _parameter as long[];
+            if (keys == null)
+            {
+                return;
+            }
 
-            return false;
+            Interlocked.Exchange(ref Diagnostics.VolumeResetInProgress, 1);
+            try
+            {
+                World world = GameManager.Instance != null ? GameManager.Instance.World : null;
+                if (world == null)
+                {
+                    return;
+                }
+
+                for (int i = 0; i < keys.Length; i++)
+                {
+                    world.ResetTriggerVolumes(keys[i]);
+                    world.ResetSleeperVolumes(keys[i]);
+                }
+            }
+            catch (Exception e)
+            {
+                Failsafe.Report("ResetVolumeDataPatch.RunVolumeReset", e);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref Diagnostics.VolumeResetInProgress, 0);
+                Interlocked.Increment(ref Diagnostics.VolumeDefersRun);
+                Interlocked.Exchange(ref Diagnostics.LastVolumeDeferRunTicks, DateTime.UtcNow.Ticks);
+            }
         }
     }
 
-    [HarmonyPatch(typeof(MultiBlockManager), "OnChunkStabilityCalculationEnabled")]
+    [HarmonyPatch(typeof(MultiBlockManager), "OnChunkInitialized")]
     internal static class StabilityDeferPatch
     {
         private static bool Prefix(MultiBlockManager __instance, Chunk chunk, ref bool __state)
         {
-            if (chunk == null)
+            __state = false;
+
+            try
             {
+                if (chunk == null)
+                {
+                    return true;
+                }
+
+                if (!__instance.CheckFeatures(MultiBlockManager.FeatureFlags.OversizedStability | MultiBlockManager.FeatureFlags.TerrainAlignment, MultiBlockManager.FeatureRequirement.OneOrMoreEnabled))
+                {
+                    return true;
+                }
+
+                if (__instance.lockObj == null)
+                {
+                    return true;
+                }
+
+                __state = Monitor.TryEnter(__instance.lockObj, 0);
+                if (__state)
+                {
+                    return true;
+                }
+
+                Deferred.QueueStability(new Vector2i(chunk.X, chunk.Z));
+                return false;
+            }
+            catch (Exception e)
+            {
+                Failsafe.Report("StabilityDeferPatch.Prefix", e);
+                __state = false;
                 return true;
             }
-
-            if (!__instance.CheckFeatures(MultiBlockManager.FeatureFlags.OversizedStability))
-            {
-                return true;
-            }
-
-            __state = Monitor.TryEnter(__instance.lockObj, 0);
-            if (__state)
-            {
-                return true;
-            }
-
-            Deferred.QueueStability(new Vector2i(chunk.X, chunk.Z));
-            return false;
         }
 
         private static void Finalizer(MultiBlockManager __instance, bool __state)
         {
-            if (__state)
+            if (!__state || __instance.lockObj == null)
+            {
+                return;
+            }
+
+            try
             {
                 Monitor.Exit(__instance.lockObj);
+            }
+            catch (Exception e)
+            {
+                Failsafe.Report("StabilityDeferPatch.Finalizer", e);
             }
         }
     }

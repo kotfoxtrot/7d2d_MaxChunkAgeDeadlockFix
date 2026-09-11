@@ -30,36 +30,80 @@ namespace MaxChunkAgeDeadlockFix
 
                 Harmony harmony = new Harmony("com.sdtdtest.maxchunkagedeadlockfix");
 
+                if (AccessTools.Method(typeof(RegionFileV2), "OptimizeLayout") == null
+                    || AccessTools.Method(typeof(RegionFileV2), "findFreeSectorOfSize") == null
+                    || AccessTools.Method(typeof(RegionFileV2), "WriteData") == null
+                    || AccessTools.Method(typeof(RegionFileSectorBased), "GetLocationInfo") == null
+                    || AccessTools.Method(typeof(RegionFileV2), "SetLocationInfo") == null
+                    || AccessTools.Field(typeof(RegionFileV2), "usedSectors") == null)
+                {
+                    Debug.LogError("[MaxChunkAgeDeadlockFix] RegionFileV2 members not found, region file protection unavailable, all patches skipped.");
+                    return;
+                }
+
+                harmony.CreateClassProcessor(typeof(OptimizeLayoutLockPatch)).Patch();
+                harmony.CreateClassProcessor(typeof(FindFreeSectorPatch)).Patch();
+                harmony.CreateClassProcessor(typeof(WriteDataSectorGuardPatch)).Patch();
+                Debug.Log("[MaxChunkAgeDeadlockFix] Region file protection applied: layout serialization, sector allocation guard, stale sector guard.");
+
                 harmony.CreateClassProcessor(typeof(CullChunklessDataPatch)).Patch();
                 Debug.Log("[MaxChunkAgeDeadlockFix] Deadlock patch applied.");
 
-                harmony.CreateClassProcessor(typeof(ResetVolumeDataPatch)).Patch();
-                Debug.Log("[MaxChunkAgeDeadlockFix] Volume reset main-thread deferral applied.");
-
-                if (AccessTools.Method(typeof(MultiBlockManager), "OnChunkStabilityCalculationEnabled") == null
-                    || AccessTools.Method(typeof(MultiBlockManager), "AddChunkOverlappingBlocksToSet") == null
-                    || AccessTools.Method(typeof(MultiBlockManager), "MainThreadUpdate") == null
-                    || AccessTools.Field(typeof(MultiBlockManager), "trackedDataMap") == null
-                    || AccessTools.Field(typeof(MultiBlockManager), "oversizedBlocksWithDirtyStability") == null)
+                if (AccessTools.Method(typeof(ThreadManager), "AddSingleTaskMainThread", new[] { typeof(string), typeof(ThreadManager.MainThreadTaskFunctionDelegate), typeof(object) }) == null)
                 {
-                    Debug.LogError("[MaxChunkAgeDeadlockFix] MultiBlockManager stability members not found, unload deferral skipped.");
+                    Debug.LogError("[MaxChunkAgeDeadlockFix] ThreadManager.AddSingleTaskMainThread(string, MainThreadTaskFunctionDelegate, object) not found, volume reset deferral skipped.");
                 }
                 else
                 {
-                    harmony.CreateClassProcessor(typeof(StabilityDeferPatch)).Patch();
+                    harmony.CreateClassProcessor(typeof(ResetVolumeDataPatch)).Patch();
+                    Debug.Log("[MaxChunkAgeDeadlockFix] Volume reset main-thread deferral applied.");
+                }
+
+                bool drainAvailable = AccessTools.Method(typeof(MultiBlockManager), "MainThreadUpdate") != null;
+                if (!drainAvailable)
+                {
+                    Debug.LogError("[MaxChunkAgeDeadlockFix] MultiBlockManager.MainThreadUpdate not found, no main-thread drain point, all deferrals skipped.");
+                }
+
+                bool stabilityDeferred = false;
+                if (drainAvailable)
+                {
+                    if (AccessTools.Method(typeof(MultiBlockManager), "OnChunkInitialized") == null
+                        || AccessTools.Method(typeof(MultiBlockManager), "AddChunkOverlappingBlocksToSet") == null
+                        || AccessTools.Field(typeof(MultiBlockManager), "trackedDataMap") == null
+                        || AccessTools.Field(typeof(MultiBlockManager), "oversizedBlocksWithDirtyStability") == null
+                        || AccessTools.Field(typeof(MultiBlockManager), "blocksWithDirtyAlignment") == null)
+                    {
+                        Debug.LogError("[MaxChunkAgeDeadlockFix] MultiBlockManager stability members not found, chunk init deferral skipped.");
+                    }
+                    else
+                    {
+                        harmony.CreateClassProcessor(typeof(StabilityDeferPatch)).Patch();
+                        stabilityDeferred = true;
+                        Debug.Log("[MaxChunkAgeDeadlockFix] Chunk init stability deferral applied.");
+                    }
+                }
+
+                bool groupingDeferred = false;
+                if (drainAvailable)
+                {
+                    if (AccessTools.Method(typeof(RegionFileManager), "AddGroupedChunks") == null
+                        || AccessTools.Field(typeof(RegionFileManager), "chunksInSaveDir") == null)
+                    {
+                        Debug.LogError("[MaxChunkAgeDeadlockFix] RegionFileManager.AddGroupedChunks not found, grouping deferral skipped.");
+                    }
+                    else
+                    {
+                        harmony.CreateClassProcessor(typeof(GroupedChunksDeferPatch)).Patch();
+                        groupingDeferred = true;
+                        Debug.Log("[MaxChunkAgeDeadlockFix] Chunk grouping deferral applied.");
+                    }
+                }
+
+                if (stabilityDeferred || groupingDeferred)
+                {
                     harmony.CreateClassProcessor(typeof(DeferredDrainPatch)).Patch();
-                    Debug.Log("[MaxChunkAgeDeadlockFix] Chunk unload stability deferral applied.");
-                }
-
-                if (AccessTools.Method(typeof(RegionFileManager), "AddGroupedChunks") == null
-                    || AccessTools.Field(typeof(RegionFileManager), "chunksInSaveDir") == null)
-                {
-                    Debug.LogError("[MaxChunkAgeDeadlockFix] RegionFileManager.AddGroupedChunks not found, grouping deferral skipped.");
-                }
-                else
-                {
-                    harmony.CreateClassProcessor(typeof(GroupedChunksDeferPatch)).Patch();
-                    Debug.Log("[MaxChunkAgeDeadlockFix] Chunk grouping deferral applied.");
+                    Debug.Log("[MaxChunkAgeDeadlockFix] Deferred work drain applied on MultiBlockManager.MainThreadUpdate.");
                 }
 
                 try

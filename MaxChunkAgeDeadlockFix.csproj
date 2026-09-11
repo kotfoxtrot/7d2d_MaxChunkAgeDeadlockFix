@@ -16,9 +16,8 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <GameRoot Condition="'$(GameRoot)' == ''">/home/sdtdtest/serverfiles</GameRoot>
+    <GameRoot Condition="'$(GameRoot)' == ''">/home/sdtdtest/scripting_2.6/gamefiles</GameRoot>
     <ManagedDir Condition="Exists('$(GameRoot)/7DaysToDieServer_Data/Managed')">$(GameRoot)/7DaysToDieServer_Data/Managed</ManagedDir>
-    <ManagedDir Condition="'$(ManagedDir)' == '' And Exists('$(GameRoot)/7DaysToDieServer_Data-v3.1/Managed')">$(GameRoot)/7DaysToDieServer_Data-v3.1/Managed</ManagedDir>
   </PropertyGroup>
 
   <Target Name="CheckManagedDir" BeforeTargets="BeforeBuild">
