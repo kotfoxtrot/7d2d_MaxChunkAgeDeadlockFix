@@ -1,24 +1,133 @@
-# MaxChunkAgeDeadlockFix (2.6)
+# MaxChunkAgeDeadlockFix
 
-Server-side Harmony mod for 7 Days to Die dedicated server **2.6**. Port of the 3.x mod of the
-same name. No client download.
+Breaks the lock-order deadlock that freezes a 7 Days to Die dedicated server when `MaxChunkAge`
+chunk reset is enabled, and repairs two pieces of missing synchronization on the chunk save path.
 
-It does three things, all on the chunk save path:
+> Server-side Harmony mod · 7 Days to Die dedicated server 2.6 · no client download
 
-1. breaks the lock-order inversion that freezes the whole server when `MaxChunkAge` chunk reset is
-   enabled;
-2. restores the synchronization 2.6 omits around region file layout optimization, which otherwise
-   lets a chunk write destroy the region file header;
-3. serializes the world's single shared chunk read and write buffers, which the engine leaves
-   unsynchronized in both 2.6 and 3.2, and which silently delete player chunks when two threads
-   load at once.
+## What it does
 
-## Symptom
+Three things, all on the chunk save path:
 
-With `MaxChunkAge` set (or after a `resetregion` / chunk reset request), the server hangs hard:
-the main thread stops ticking, players time out, the process stays alive and idle. No exception,
-no stack trace. A `SIGQUIT` stack dump shows the main thread and the `SaveChunks` thread each
-parked in `Monitor.Enter`, waiting on each other.
+1. **breaks the lock-order inversion** that freezes the whole server when `MaxChunkAge` chunk reset
+   is enabled. The main thread stops ticking, players time out, the process stays alive and idle,
+   and a `SIGQUIT` dump shows the main thread and the `SaveChunks` thread each parked in
+   `Monitor.Enter`, waiting on each other;
+2. **restores the synchronization 2.6 omits** around region file layout optimization, which
+   otherwise lets a chunk write destroy the region file header and leaves the file unopenable with
+   `Incorrect region file header!`;
+3. **serializes the world's single shared chunk read and write buffers**, which the engine leaves
+   unsynchronized in both 2.6 and 3.2, and which silently delete player chunks when two threads load
+   at once.
+
+Contended locks are taken non-blocking and the work is replayed on the main thread instead of being
+dropped, so chunk reset keeps its full behaviour. Every patch on the save path falls back to vanilla
+instead of propagating, so a mod fault can never abort `DoSaveChunks`.
+
+This is the 2.6 port of the 3.x mod of the same name; see
+[What differs from the 3.x version](#what-differs-from-the-3x-version). It carries two fixes the 3.x
+build does not need.
+
+## Requirements
+
+| | |
+|---|---|
+| game | 7 Days to Die dedicated server **2.6** |
+| dependency | `0_TFP_Harmony` (ships with the server) |
+| clients | nothing to download, server-side only |
+
+Branches of this repository:
+
+| branch | game version |
+|---|---|
+| [`3.x`](https://github.com/kotfoxtrot/7d2d_MaxChunkAgeDeadlockFix/tree/3.x) | 3.0, 3.1, 3.2 |
+| [`2.6`](https://github.com/kotfoxtrot/7d2d_MaxChunkAgeDeadlockFix/tree/2.6) | 2.6 |
+
+**Recommended companion: [CullExpiredFix](https://github.com/kotfoxtrot/7d2d_CullExpiredFix).**
+This mod makes `MaxChunkAge` reset *safe*, it does not make it *cheap*. See
+[Related mods](#related-mods).
+
+## Install
+
+### From a release
+
+1. Download the **2.6** archive from
+   [Releases](https://github.com/kotfoxtrot/7d2d_MaxChunkAgeDeadlockFix/releases).
+2. Unpack it into `<server>/Mods/` so that you end up with `<server>/Mods/1_MaxChunkAgeDeadlockFix/`
+   containing `MaxChunkAgeDeadlockFix.dll`, `ModInfo.xml` and `Config.xml`.
+3. Restart the server.
+
+### From source
+
+```bash
+git clone -b 2.6 https://github.com/kotfoxtrot/7d2d_MaxChunkAgeDeadlockFix.git
+cd 7d2d_MaxChunkAgeDeadlockFix
+dotnet build -c Release -p:GameRoot=/path/to/server
+```
+
+`GameRoot` is the dedicated server root — the folder holding `7DaysToDieServer_Data/Managed` and
+`Mods/0_TFP_Harmony`. Omit `-p:GameRoot` and the path baked into the `.csproj` is used. The build
+references the game assemblies in place and never copies them.
+
+Copy `bin/MaxChunkAgeDeadlockFix.dll`, `ModInfo.xml` and `Config.xml` into
+`<server>/Mods/1_MaxChunkAgeDeadlockFix/`.
+
+### Folder name
+
+The folder must start with `1_`. Mods are loaded in alphabetical order: `0_TFP_Harmony` provides
+Harmony and has to come first, and this mod patches engine call sites that other mods also patch,
+so its patches should be applied ahead of theirs. `1_` puts it directly after Harmony and before
+everything else.
+
+### Verifying before deploy
+
+The incident this port fixes was a 3.x-only API call that compiled fine and threw at runtime. Two
+checks catch that class of bug without starting the server:
+
+```bash
+dotnet apicheck.dll \
+  bin/MaxChunkAgeDeadlockFix.dll \
+  <server>/7DaysToDieServer_Data/Managed \
+  <server>/Mods/0_TFP_Harmony
+
+dotnet patchcheck.dll \
+  bin/MaxChunkAgeDeadlockFix.dll \
+  <server>/7DaysToDieServer_Data/Managed/Assembly-CSharp.dll
+```
+
+The first resolves every member reference against the real 2.6 assemblies; the second resolves every
+`[HarmonyPatch]` target and every injected parameter name.
+
+## Configuration
+
+`Config.xml` sits next to the DLL in the mod folder and is created with defaults on first start if
+missing. Both switches are on by default:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<MaxChunkAgeDeadlockFix>
+  <property name="Logging" value="true" />
+  <property name="Watchdog" value="true" />
+</MaxChunkAgeDeadlockFix>
+```
+
+| property | default | effect when `false` |
+|---|---|---|
+| `Logging` | `true` | silences the routine diagnostic output: chunk reset/removal batches, the "CullChunklessData skipped" notice, the deferred backlog warning and the per-patch "applied" lines at startup. Counters keep running, so a watchdog dump still reports real numbers. |
+| `Watchdog` | `true` | the watchdog is not installed at all: no `ThreadManager.UpdateEv` subscription, no background thread, no stall warnings and no `SIGQUIT` stack dump. |
+
+`Logging=false` never silences the data-integrity reports, because those describe something that
+actually happened to chunk data on disk: the chunk recovered on read retry, the refused
+delete-on-read-failure, the dropped stale sector entry, and every `Failsafe` hit. Those stay at
+`Log.Warning`/`Log.Error` regardless.
+
+The file is hot-reloaded: a `FileSystemWatcher` (with a 1s poll fallback) picks up edits while the
+server runs, and each successful reload is logged. `Logging` takes effect immediately; `Watchdog`
+starts or stops the watchdog thread on the spot. A malformed file is rejected with a warning and
+the current values are kept.
+
+Both switches affect only diagnostics. The deadlock, region file and chunk stream patches are
+always applied.
 
 ## The locks involved
 
@@ -107,6 +216,10 @@ Because the `chunksToUnload` → `lockObj` edge is absent in 2.6, deferring `OnC
 not required to break the cycle — either `CullChunklessDataPatch` or `GroupedChunksDeferPatch`
 alone is sufficient. It is kept because it still keeps the lighting thread from piling up behind
 `lockObj` and costs a `TryEnter(0)` on an uncontended lock.
+
+The region file and shared chunk stream protection below have no counterpart in the 3.x build:
+3.2 has the `lock (this)` that 2.6 omits, and the shared-buffer defect is reachable there only
+under the same second-reader condition.
 
 ## The fix
 
@@ -263,19 +376,6 @@ Like region file protection, these members are a precondition: if `LoadChunk`,
 The retry is the one exception, applied in its own `try/catch` because its signature is the most
 fragile; if it fails the gates still stand.
 
-## Failsafe
-
-Every patch on the chunk save path is wrapped so it can never propagate an exception into the
-game. This is not theoretical: `DoSaveChunks` calls `CullExpiredChunks` **before** it writes
-anything, catches everything, and returns `false`. One throwing prefix therefore stops chunk
-saving for the whole process — and because `CullExpiredChunks` clears `expiredChunks` only after
-`RemoveChunks` returns, the expired list also stops being cleared and grows to its 10000 cap. The
-server then never saves another chunk and hangs forever in `WaitSaveDone()` on shutdown, which has
-no timeout.
-
-On any exception a patch logs once per site per 60s through `Failsafe.Report` and returns `true`,
-letting the vanilla method run. `failsafeHits` is included in the watchdog dump.
-
 ## Diagnostics
 
 **Chunk reset logging.** A `[ThreadStatic]` marker around `CullExpiredChunks` lets a postfix on
@@ -314,38 +414,20 @@ calls.
 With the gates in place all three should sit at zero. `ChunkIoProbe`, if installed, is the
 independent check: its `overlapped` count for the reader resource must go to zero.
 
-## Configuration
+## Failure behaviour
 
-`Config.xml` sits next to the DLL in the mod folder and is created with defaults on first start if
-missing. Both switches are on by default:
+Every patch on the chunk save path is wrapped so it can never propagate an exception into the
+game. This is not theoretical: `DoSaveChunks` calls `CullExpiredChunks` **before** it writes
+anything, catches everything, and returns `false`. One throwing prefix therefore stops chunk
+saving for the whole process — and because `CullExpiredChunks` clears `expiredChunks` only after
+`RemoveChunks` returns, the expired list also stops being cleared and grows to its 10000 cap. The
+server then never saves another chunk and hangs forever in `WaitSaveDone()` on shutdown, which has
+no timeout.
 
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<MaxChunkAgeDeadlockFix>
-  <property name="Logging" value="true" />
-  <property name="Watchdog" value="true" />
-</MaxChunkAgeDeadlockFix>
-```
+On any exception a patch logs once per site per 60s through `Failsafe.Report` and returns `true`,
+letting the vanilla method run. `failsafeHits` is included in the watchdog dump.
 
-| property | default | effect when `false` |
-|---|---|---|
-| `Logging` | `true` | silences the routine diagnostic output: chunk reset/removal batches, the "CullChunklessData skipped" notice, the deferred backlog warning and the per-patch "applied" lines at startup. Counters keep running, so a watchdog dump still reports real numbers. |
-| `Watchdog` | `true` | the watchdog is not installed at all: no `ThreadManager.UpdateEv` subscription, no background thread, no stall warnings and no `SIGQUIT` stack dump. |
-
-`Logging=false` never silences the data-integrity reports, because those describe something that
-actually happened to chunk data on disk: the chunk recovered on read retry, the refused
-delete-on-read-failure, the dropped stale sector entry, and every `Failsafe` hit. Those stay at
-`Log.Warning`/`Log.Error` regardless.
-
-The file is hot-reloaded: a `FileSystemWatcher` (with a 1s poll fallback) picks up edits while the
-server runs, and each successful reload is logged. `Logging` takes effect immediately; `Watchdog`
-starts or stops the watchdog thread on the spot. A malformed file is rejected with a warning and
-the current values are kept.
-
-Both switches affect only diagnostics. The deadlock, region file and chunk stream patches are
-always applied.
-
-## Behaviour notes
+Beyond that:
 
 * Only `CullChunklessData` can be skipped; stability updates and chunk grouping are replayed.
   Both queues are capped at 65536 entries. The grouping queue falls through to the original
@@ -353,7 +435,7 @@ always applied.
   positions at the cap, which at worst delays an oversized-block stability refresh.
 * All patches are guarded by `AccessTools` lookups in `InitMod`. If a game update renames a
   member, that patch group is skipped with a log line instead of throwing, and the rest still
-  apply.
+  apply — except for the two preconditions above, where nothing at all is applied.
 * Logging and watchdog installation are wrapped in their own `try/catch` — if either fails the
   deadlock patches are unaffected.
 * The reader and writer gates are process-wide and held only for the duration of one chunk load or
@@ -365,34 +447,24 @@ always applied.
   per reset chunk, where its `ULM_PowerManager` already indexes every node by `Vector3i` — is a
   performance problem for its author, not a correctness one for this mod.
 
-## Build
+## Related mods
 
-```bash
-dotnet build -c Release
-```
+Three server-side mods for the same dedicated server, same build layout, same `[Name]` log prefix.
+All three have a `2.6` branch:
 
-`GameRoot` defaults to `/home/sdtdtest/scripting_2.6/gamefiles`; override with
-`dotnet build -c Release -p:GameRoot=/path/to/server`.
+| mod | what it is for |
+|---|---|
+| [MaxChunkAgeDeadlockFix](https://github.com/kotfoxtrot/7d2d_MaxChunkAgeDeadlockFix) | this mod — makes `MaxChunkAge` chunk reset safe by breaking the lock-order deadlock |
+| [CullExpiredFix](https://github.com/kotfoxtrot/7d2d_CullExpiredFix) | makes that same reset cheap: `CullExpiredChunks` drops from 47% of one core to 0.05% |
+| [ProfLog](https://github.com/kotfoxtrot/7d2d_ProfLog) | read-only profiler — the tool those numbers were measured with |
 
-Deploy `bin/MaxChunkAgeDeadlockFix.dll` plus `ModInfo.xml` and `Config.xml` into
-`<server>/Mods/1_MaxChunkAgeDeadlockFix/`. The `1_` prefix keeps it loading after
-`0_TFP_Harmony`.
+**CullExpiredFix — optional, recommended.** This mod makes `MaxChunkAge` safe to enable; it does
+nothing about what that reset costs. With `MaxChunkAge` on, the save thread runs a full O(N) sweep
+of the save directory once per saved chunk — measured at 17.7 sweeps/s, 26 ms each, 47% of one core
+on a 105k-chunk world. `CullExpiredChunks` and its call site are identical in 2.6, so the same fix
+applies. Not required: this mod is complete on its own.
 
-## Verifying before deploy
-
-The incident this port fixes was a 3.x-only API call that compiled fine and threw at runtime.
-Two checks catch that class of bug without starting the server:
-
-```bash
-dotnet /home/sdtdtest/crashdig/apicheck/bin/Release/net8.0/apicheck.dll \
-  bin/MaxChunkAgeDeadlockFix.dll \
-  /home/sdtdtest/scripting_2.6/gamefiles/7DaysToDieServer_Data/Managed \
-  /home/sdtdtest/scripting_2.6/gamefiles/Mods/0_TFP_Harmony
-
-dotnet /home/sdtdtest/crashdig/patchcheck/bin/Release/net8.0/patchcheck.dll \
-  bin/MaxChunkAgeDeadlockFix.dll \
-  /home/sdtdtest/scripting_2.6/gamefiles/7DaysToDieServer_Data/Managed/Assembly-CSharp.dll
-```
-
-The first resolves every member reference against the real 2.6 assemblies; the second resolves
-every `[HarmonyPatch]` target and every injected parameter name.
+**ProfLog — optional, for admins.** A read-only measuring mod. It decomposes `CullExpiredChunks`
+into lock wait, protection rebuild, scan and removal, and its `MultiBlockMain` probe covers this
+mod's main-thread drain and its `TryEnter(chunksInSaveDir, 20)`. Useful for diagnosis, not needed to
+run this mod.
