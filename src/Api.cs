@@ -41,10 +41,34 @@ namespace MaxChunkAgeDeadlockFix
                     return;
                 }
 
+                if (AccessTools.Method(typeof(ChunkSnapshotUtil), "LoadChunk") == null
+                    || AccessTools.Method(typeof(RegionFileChunkReader), "readIntoLoadStream") == null
+                    || AccessTools.Method(typeof(RegionFileChunkWriter), "WriteStreamCompressed") == null
+                    || AccessTools.Method(typeof(RegionFileAccessMultipleChunks), "Remove") == null)
+                {
+                    Debug.LogError("[MaxChunkAgeDeadlockFix] chunk stream members not found, shared buffer protection unavailable, all patches skipped.");
+                    return;
+                }
+
                 harmony.CreateClassProcessor(typeof(OptimizeLayoutLockPatch)).Patch();
                 harmony.CreateClassProcessor(typeof(FindFreeSectorPatch)).Patch();
                 harmony.CreateClassProcessor(typeof(WriteDataSectorGuardPatch)).Patch();
                 Debug.Log("[MaxChunkAgeDeadlockFix] Region file protection applied: layout serialization, sector allocation guard, stale sector guard.");
+
+                harmony.CreateClassProcessor(typeof(LoadChunkLockPatch)).Patch();
+                harmony.CreateClassProcessor(typeof(WriteStreamLockPatch)).Patch();
+                harmony.CreateClassProcessor(typeof(FailedLoadRemoveGuardPatch)).Patch();
+                Debug.Log("[MaxChunkAgeDeadlockFix] Chunk stream protection applied: read serialization, write serialization, deletion guard.");
+
+                try
+                {
+                    harmony.CreateClassProcessor(typeof(ChunkReadRetryPatch)).Patch();
+                    Debug.Log("[MaxChunkAgeDeadlockFix] Chunk read retry applied.");
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning("[MaxChunkAgeDeadlockFix] Chunk read retry failed to apply, stream protection unaffected: " + e);
+                }
 
                 harmony.CreateClassProcessor(typeof(CullChunklessDataPatch)).Patch();
                 Debug.Log("[MaxChunkAgeDeadlockFix] Deadlock patch applied.");

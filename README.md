@@ -1,8 +1,17 @@
 # MaxChunkAgeDeadlockFix (2.6)
 
 Server-side Harmony mod for 7 Days to Die dedicated server **2.6**. Port of the 3.x mod of the
-same name. Breaks the lock-order inversion that freezes the whole server when `MaxChunkAge` chunk
-reset is enabled. No client download.
+same name. No client download.
+
+It does three things, all on the chunk save path:
+
+1. breaks the lock-order inversion that freezes the whole server when `MaxChunkAge` chunk reset is
+   enabled;
+2. restores the synchronization 2.6 omits around region file layout optimization, which otherwise
+   lets a chunk write destroy the region file header;
+3. serializes the world's single shared chunk read and write buffers, which the engine leaves
+   unsynchronized in both 2.6 and 3.2, and which silently delete player chunks when two threads
+   load at once.
 
 ## Symptom
 
@@ -165,6 +174,95 @@ ThreadManager.AddSingleTaskMainThread("MaxChunkAgeDeadlockFix.ResetVolumes", Run
 
 `InitMod` verifies that exact overload exists before installing the patch.
 
+## Region file protection
+
+Vanilla 2.6 omits the `lock (this)` that 3.2 has on `RegionFileV2.OptimizeLayout`. `RemoveChunk`
+poisons `usedSectors` with key 0 through `SetLocationInfo(cX, cZ, 0, 0)`, `findFreeSectorOfSize`
+then hands back sector 0, 1 or 2, and `WriteData` logs `Sector offset < 3` but writes anyway,
+destroying the magic bytes and the location header. The file no longer opens:
+`Incorrect region file header!`.
+
+Three patches close it:
+
+* **`OptimizeLayout`** runs under the region file lock, plus a process-wide gate — see below.
+* **`findFreeSectorOfSize`** skips `usedSectors` entries below sector 3 or with a non-positive
+  length, never lets the running candidate move backwards, and a postfix clamps any result below
+  3 up to 3.
+* **`WriteData`** drops a location entry that points into the reserved sectors before the write
+  and lets the chunk be reallocated, instead of overwriting the header.
+
+`OptimizeLayout` also takes a **static** gate, not just the instance lock. `optimizerMemoryStream`
+is `static` on `RegionFileV2` and shared by every region file in the world, so `lock (this)` — the
+form 3.2 uses — does not protect it. Two threads optimizing different regions would trample a
+shared 16 MB buffer. Only the save thread calls it today, so this has never fired; the guard is
+there because the lock was on the wrong object.
+
+Region file protection is a precondition. If any of those members is missing, no patch in the mod
+is applied at all, because deferral without it is the combination that corrupts.
+
+## Shared chunk stream protection
+
+The engine keeps **one** chunk read path and **one** chunk write path for the whole world, with no
+synchronization:
+
+* `RegionFileAccessMultipleChunks` holds a single `readStream` and a single `writeStream`.
+* `RegionFileChunkReader` holds a single `zipLoadStream` (a `DeflateInputStream` created once and
+  reused forever, because `innerLoadStream != inputStream` never becomes true), plus
+  `loadChunkMemoryStream`, `loadBuffer` and `magicBytes`.
+* `RegionFileChunkWriter` holds a single `zipSaveStream` and `saveBuffer`.
+
+Two threads loading chunks at once therefore tear each other's stream. The victim thread sees
+`Wrong chunk header!` or `Attempted to read past the end of the stream`, or an inflate error such
+as `invalid block type`, and `ChunkSnapshotUtil.LoadChunk` then **deletes the chunk** in its catch
+block via `regionFileAccess.Remove` — without consulting land claim protection. Player builds
+disappear and regenerate from seed.
+
+This is identical in 2.6 and 3.2; those three files do not differ by a byte. A vanilla server has
+a single chunk loader and never trips it. Undead Legacy adds a second one:
+`H_ChunkResetPatch.RegionFileManager_RemoveChunks_PrefixPatch` calls `RegionFileManager.GetChunkSync`
+for every chunk being reset, on `thread_SaveChunks`, while `ChunkProviderGenerateWorld.GenerateChunksThread`
+is loading chunks for players.
+
+Measured on a live server with `ChunkIoProbe`: 194 079 loads without concurrent access produced
+**zero** failures; 27 loads with concurrent access produced **four**. Two `error_backup` dumps
+written by the two different threads for two different chunks were byte-identical, and their
+content was offset by one byte from the chunk header — the shared stream, caught mid-read.
+
+Each shared buffer has exactly one entry point, so one lock per path covers all of it:
+
+```
+readIntoLoadStream    <- only ChunkSnapshotUtil.LoadChunk
+WriteBackup           <- only ChunkSnapshotUtil.LoadChunk
+GetInputStream        <- only readIntoLoadStream
+WriteStreamCompressed <- only RegionFileChunkSnapshot.Write
+```
+
+* **`ChunkSnapshotUtil.LoadChunk`** runs under a process-wide reader gate. This covers
+  `readStream`, `zipLoadStream`, `loadChunkMemoryStream`, `loadBuffer`, `magicBytes` and
+  `WriteBackup` in one place, for any number of readers — not just the two that exist today.
+* **`RegionFileChunkWriter.WriteStreamCompressed`** runs under a writer gate. Only the save thread
+  writes today and no contention has ever been observed, but it is the same class of defect.
+* **`readIntoLoadStream`** retries once on failure. Because the retry runs with the reader gate
+  held, a read that failed from interference succeeds the second time and the chunk is recovered
+  instead of destroyed. A genuinely corrupt chunk fails twice and falls through to vanilla
+  handling. A `[ThreadStatic]` flag stops the retry recursing.
+* **`RegionFileAccessMultipleChunks.Remove`** is refused while the calling thread is inside
+  `LoadChunk`. `Remove` is reachable there only after the catch block, so this blocks exactly the
+  delete-on-read-failure path and nothing else. Note what this does and does not buy: the chunk
+  survives on disk, but the caller still regenerates it in memory and may save the regenerated
+  copy over it. The real protection is the gate and the retry; this is a last net that keeps the
+  bytes recoverable and makes the event loud.
+
+Lock order is `saveLock` → `chunksInSaveDir` → reader gate on the save thread, and reader gate →
+`regionTable` → region file instance on the loader. No path takes them the other way round, so
+there is no inversion. Contention is rare by measurement — 27 in 194 079 calls — so serializing
+costs effectively nothing.
+
+Like region file protection, these members are a precondition: if `LoadChunk`,
+`readIntoLoadStream`, `WriteStreamCompressed` or `Remove` cannot be found, the mod applies nothing.
+The retry is the one exception, applied in its own `try/catch` because its signature is the most
+fragile; if it fails the gates still stand.
+
 ## Failsafe
 
 Every patch on the chunk save path is wrapped so it can never propagate an exception into the
@@ -199,6 +297,23 @@ thread every 5s:
 
 The watchdog only reports. It never touches locks or game state.
 
+**Counters.** The watchdog dump also carries the region and stream counters:
+
+```
+reservedSectorRejections=0 staleReservedEntries=0
+chunkReadRetries recovered=0 failed=0 deletionsBlocked=0
+```
+
+`reservedSectorRejections` and `staleReservedEntries` must stay at zero — a non-zero value means a
+region file was about to be written into its own header. `chunkReadRetries recovered` counts reads
+that failed and succeeded on the second attempt under the gate; each one is a chunk that vanilla
+would have deleted. `failed` counts reads that failed twice, which points at genuine on-disk
+corruption rather than interference. `deletionsBlocked` counts refused delete-on-read-failure
+calls.
+
+With the gates in place all three should sit at zero. `ChunkIoProbe`, if installed, is the
+independent check: its `overlapped` count for the reader resource must go to zero.
+
 ## Behaviour notes
 
 * Only `CullChunklessData` can be skipped; stability updates and chunk grouping are replayed.
@@ -210,6 +325,14 @@ The watchdog only reports. It never touches locks or game state.
   apply.
 * Logging and watchdog installation are wrapped in their own `try/catch` — if either fails the
   deadlock patches are unaffected.
+* The reader and writer gates are process-wide and held only for the duration of one chunk load or
+  one chunk write, so a long cull pass does not lock the loader out — the two interleave between
+  individual chunks.
+* Fixing the shared buffers here rather than in a mod that patches Undead Legacy is deliberate:
+  the defect is in the engine, and the gate covers any second, third or fourth reader regardless
+  of which mod introduces it. Undead Legacy's own cost — one disk read and 65 536 block lookups
+  per reset chunk, where its `ULM_PowerManager` already indexes every node by `Vector3i` — is a
+  performance problem for its author, not a correctness one for this mod.
 
 ## Build
 

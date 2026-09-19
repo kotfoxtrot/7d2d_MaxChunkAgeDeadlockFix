@@ -13,14 +13,16 @@ namespace MaxChunkAgeDeadlockFix
     [HarmonyPatch(typeof(RegionFileV2), "OptimizeLayout")]
     internal static class OptimizeLayoutLockPatch
     {
-        private static void Prefix(RegionFileV2 __instance, ref bool __state)
+        private static void Prefix(RegionFileV2 __instance, ref int __state)
         {
-            __state = false;
+            __state = 0;
 
             try
             {
+                Monitor.Enter(ChunkIoGates.Optimizer);
+                __state = 1;
                 Monitor.Enter(__instance);
-                __state = true;
+                __state = 2;
             }
             catch (Exception e)
             {
@@ -28,16 +30,19 @@ namespace MaxChunkAgeDeadlockFix
             }
         }
 
-        private static void Finalizer(RegionFileV2 __instance, bool __state)
+        private static void Finalizer(RegionFileV2 __instance, int __state)
         {
-            if (!__state)
-            {
-                return;
-            }
-
             try
             {
-                Monitor.Exit(__instance);
+                if (__state >= 2)
+                {
+                    Monitor.Exit(__instance);
+                }
+
+                if (__state >= 1)
+                {
+                    Monitor.Exit(ChunkIoGates.Optimizer);
+                }
             }
             catch (Exception e)
             {

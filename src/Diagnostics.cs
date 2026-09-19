@@ -35,6 +35,12 @@ namespace MaxChunkAgeDeadlockFix
 
         public static long StaleReservedSectorEntries;
 
+        public static long ChunkReadRetriesRecovered;
+
+        public static long ChunkReadRetriesFailed;
+
+        public static long FailedLoadRemovalsBlocked;
+
         public static string Describe(double stalledSeconds, long mainTicks)
         {
             long now = DateTime.UtcNow.Ticks;
@@ -54,6 +60,9 @@ namespace MaxChunkAgeDeadlockFix
                 + " pending=" + Deferred.PendingGroupingCount
                 + " | reservedSectorRejections=" + Interlocked.Read(ref ReservedSectorRejections)
                 + " staleReservedEntries=" + Interlocked.Read(ref StaleReservedSectorEntries)
+                + " | chunkReadRetries recovered=" + Interlocked.Read(ref ChunkReadRetriesRecovered)
+                + " failed=" + Interlocked.Read(ref ChunkReadRetriesFailed)
+                + " deletionsBlocked=" + Interlocked.Read(ref FailedLoadRemovalsBlocked)
                 + " | failsafeHits=" + Interlocked.Read(ref Failsafe.Total)
                 + " | sinceLastReset=" + Age(now, Interlocked.Read(ref LastResetTicks))
                 + " sinceLastVolumeDeferRun=" + Age(now, Interlocked.Read(ref LastVolumeDeferRunTicks))
