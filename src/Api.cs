@@ -10,6 +10,11 @@ namespace MaxChunkAgeDeadlockFix
         {
             try
             {
+                Settings.Load(modInstance != null ? modInstance.Path : ".");
+                Settings.StartWatch();
+                ModEvents.GameShutdown.RegisterHandler(OnGameShutdown);
+                Debug.Log("[MaxChunkAgeDeadlockFix] Config: " + Settings.Describe() + " (" + Settings.Path + ")");
+
                 if (AccessTools.Field(typeof(MultiBlockManager), "lockObj") == null)
                 {
                     Debug.LogError("[MaxChunkAgeDeadlockFix] MultiBlockManager.lockObj not found, game code changed, patch skipped.");
@@ -53,17 +58,26 @@ namespace MaxChunkAgeDeadlockFix
                 harmony.CreateClassProcessor(typeof(OptimizeLayoutLockPatch)).Patch();
                 harmony.CreateClassProcessor(typeof(FindFreeSectorPatch)).Patch();
                 harmony.CreateClassProcessor(typeof(WriteDataSectorGuardPatch)).Patch();
-                Debug.Log("[MaxChunkAgeDeadlockFix] Region file protection applied: layout serialization, sector allocation guard, stale sector guard.");
+                if (Settings.Logging)
+                {
+                    Debug.Log("[MaxChunkAgeDeadlockFix] Region file protection applied: layout serialization, sector allocation guard, stale sector guard.");
+                }
 
                 harmony.CreateClassProcessor(typeof(LoadChunkLockPatch)).Patch();
                 harmony.CreateClassProcessor(typeof(WriteStreamLockPatch)).Patch();
                 harmony.CreateClassProcessor(typeof(FailedLoadRemoveGuardPatch)).Patch();
-                Debug.Log("[MaxChunkAgeDeadlockFix] Chunk stream protection applied: read serialization, write serialization, deletion guard.");
+                if (Settings.Logging)
+                {
+                    Debug.Log("[MaxChunkAgeDeadlockFix] Chunk stream protection applied: read serialization, write serialization, deletion guard.");
+                }
 
                 try
                 {
                     harmony.CreateClassProcessor(typeof(ChunkReadRetryPatch)).Patch();
-                    Debug.Log("[MaxChunkAgeDeadlockFix] Chunk read retry applied.");
+                    if (Settings.Logging)
+                    {
+                        Debug.Log("[MaxChunkAgeDeadlockFix] Chunk read retry applied.");
+                    }
                 }
                 catch (Exception e)
                 {
@@ -71,7 +85,10 @@ namespace MaxChunkAgeDeadlockFix
                 }
 
                 harmony.CreateClassProcessor(typeof(CullChunklessDataPatch)).Patch();
-                Debug.Log("[MaxChunkAgeDeadlockFix] Deadlock patch applied.");
+                if (Settings.Logging)
+                {
+                    Debug.Log("[MaxChunkAgeDeadlockFix] Deadlock patch applied.");
+                }
 
                 if (AccessTools.Method(typeof(ThreadManager), "AddSingleTaskMainThread", new[] { typeof(string), typeof(ThreadManager.MainThreadTaskFunctionDelegate), typeof(object) }) == null)
                 {
@@ -80,7 +97,10 @@ namespace MaxChunkAgeDeadlockFix
                 else
                 {
                     harmony.CreateClassProcessor(typeof(ResetVolumeDataPatch)).Patch();
-                    Debug.Log("[MaxChunkAgeDeadlockFix] Volume reset main-thread deferral applied.");
+                    if (Settings.Logging)
+                    {
+                        Debug.Log("[MaxChunkAgeDeadlockFix] Volume reset main-thread deferral applied.");
+                    }
                 }
 
                 bool drainAvailable = AccessTools.Method(typeof(MultiBlockManager), "MainThreadUpdate") != null;
@@ -104,7 +124,10 @@ namespace MaxChunkAgeDeadlockFix
                     {
                         harmony.CreateClassProcessor(typeof(StabilityDeferPatch)).Patch();
                         stabilityDeferred = true;
-                        Debug.Log("[MaxChunkAgeDeadlockFix] Chunk init stability deferral applied.");
+                        if (Settings.Logging)
+                        {
+                            Debug.Log("[MaxChunkAgeDeadlockFix] Chunk init stability deferral applied.");
+                        }
                     }
                 }
 
@@ -120,21 +143,30 @@ namespace MaxChunkAgeDeadlockFix
                     {
                         harmony.CreateClassProcessor(typeof(GroupedChunksDeferPatch)).Patch();
                         groupingDeferred = true;
-                        Debug.Log("[MaxChunkAgeDeadlockFix] Chunk grouping deferral applied.");
+                        if (Settings.Logging)
+                        {
+                            Debug.Log("[MaxChunkAgeDeadlockFix] Chunk grouping deferral applied.");
+                        }
                     }
                 }
 
                 if (stabilityDeferred || groupingDeferred)
                 {
                     harmony.CreateClassProcessor(typeof(DeferredDrainPatch)).Patch();
-                    Debug.Log("[MaxChunkAgeDeadlockFix] Deferred work drain applied on MultiBlockManager.MainThreadUpdate.");
+                    if (Settings.Logging)
+                    {
+                        Debug.Log("[MaxChunkAgeDeadlockFix] Deferred work drain applied on MultiBlockManager.MainThreadUpdate.");
+                    }
                 }
 
                 try
                 {
                     harmony.CreateClassProcessor(typeof(CullExpiredChunksMarker)).Patch();
                     harmony.CreateClassProcessor(typeof(RemoveChunksLogPatch)).Patch();
-                    Debug.Log("[MaxChunkAgeDeadlockFix] Chunk reset logging applied.");
+                    if (Settings.Logging)
+                    {
+                        Debug.Log("[MaxChunkAgeDeadlockFix] Chunk reset logging applied.");
+                    }
                 }
                 catch (Exception e)
                 {
@@ -143,8 +175,10 @@ namespace MaxChunkAgeDeadlockFix
 
                 try
                 {
-                    MainThreadWatchdog.Install();
-                    Debug.Log("[MaxChunkAgeDeadlockFix] Main thread watchdog started (warn 45s, stack dump 90s).");
+                    MainThreadWatchdog.Apply();
+                    Debug.Log(MainThreadWatchdog.Running
+                        ? "[MaxChunkAgeDeadlockFix] Main thread watchdog started (warn 45s, stack dump 90s)."
+                        : "[MaxChunkAgeDeadlockFix] Main thread watchdog disabled by Config.xml.");
                 }
                 catch (Exception e)
                 {
@@ -154,6 +188,17 @@ namespace MaxChunkAgeDeadlockFix
             catch (Exception e)
             {
                 Debug.LogError("[MaxChunkAgeDeadlockFix] Init failed: " + e);
+            }
+        }
+
+        private void OnGameShutdown(ref ModEvents.SGameShutdownData data)
+        {
+            try
+            {
+                Settings.StopWatch();
+            }
+            catch
+            {
             }
         }
     }

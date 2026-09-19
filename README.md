@@ -314,6 +314,37 @@ calls.
 With the gates in place all three should sit at zero. `ChunkIoProbe`, if installed, is the
 independent check: its `overlapped` count for the reader resource must go to zero.
 
+## Configuration
+
+`Config.xml` sits next to the DLL in the mod folder and is created with defaults on first start if
+missing. Both switches are on by default:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<MaxChunkAgeDeadlockFix>
+  <property name="Logging" value="true" />
+  <property name="Watchdog" value="true" />
+</MaxChunkAgeDeadlockFix>
+```
+
+| property | default | effect when `false` |
+|---|---|---|
+| `Logging` | `true` | silences the routine diagnostic output: chunk reset/removal batches, the "CullChunklessData skipped" notice, the deferred backlog warning and the per-patch "applied" lines at startup. Counters keep running, so a watchdog dump still reports real numbers. |
+| `Watchdog` | `true` | the watchdog is not installed at all: no `ThreadManager.UpdateEv` subscription, no background thread, no stall warnings and no `SIGQUIT` stack dump. |
+
+`Logging=false` never silences the data-integrity reports, because those describe something that
+actually happened to chunk data on disk: the chunk recovered on read retry, the refused
+delete-on-read-failure, the dropped stale sector entry, and every `Failsafe` hit. Those stay at
+`Log.Warning`/`Log.Error` regardless.
+
+The file is hot-reloaded: a `FileSystemWatcher` (with a 1s poll fallback) picks up edits while the
+server runs, and each successful reload is logged. `Logging` takes effect immediately; `Watchdog`
+starts or stops the watchdog thread on the spot. A malformed file is rejected with a warning and
+the current values are kept.
+
+Both switches affect only diagnostics. The deadlock, region file and chunk stream patches are
+always applied.
+
 ## Behaviour notes
 
 * Only `CullChunklessData` can be skipped; stability updates and chunk grouping are replayed.
@@ -343,7 +374,7 @@ dotnet build -c Release
 `GameRoot` defaults to `/home/sdtdtest/scripting_2.6/gamefiles`; override with
 `dotnet build -c Release -p:GameRoot=/path/to/server`.
 
-Deploy `bin/MaxChunkAgeDeadlockFix.dll` plus `ModInfo.xml` into
+Deploy `bin/MaxChunkAgeDeadlockFix.dll` plus `ModInfo.xml` and `Config.xml` into
 `<server>/Mods/1_MaxChunkAgeDeadlockFix/`. The `1_` prefix keeps it loading after
 `0_TFP_Harmony`.
 

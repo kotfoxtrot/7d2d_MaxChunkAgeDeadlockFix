@@ -42,6 +42,11 @@ namespace MaxChunkAgeDeadlockFix
                 Interlocked.Add(ref Diagnostics.ChunksReset, count);
                 Interlocked.Exchange(ref Diagnostics.LastResetTicks, DateTime.UtcNow.Ticks);
 
+                if (!Settings.Logging)
+                {
+                    return;
+                }
+
                 StringBuilder sb = new StringBuilder(64 + Math.Min(count, MaxListed) * 14);
                 sb.Append("[MaxChunkAgeDeadlockFix] ");
                 sb.Append(CullExpiredChunksMarker.Active
