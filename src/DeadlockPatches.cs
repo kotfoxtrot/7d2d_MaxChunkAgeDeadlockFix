@@ -22,7 +22,8 @@ namespace MaxChunkAgeDeadlockFix
                 int total = Interlocked.Increment(ref skipCount);
                 long now = DateTime.UtcNow.Ticks;
                 long last = Interlocked.Read(ref lastLogTicks);
-                if (now - last > 30 * TimeSpan.TicksPerSecond
+                if (Settings.Logging
+                    && now - last > 30 * TimeSpan.TicksPerSecond
                     && Interlocked.CompareExchange(ref lastLogTicks, now, last) == last)
                 {
                     Debug.Log("[MaxChunkAgeDeadlockFix] CullChunklessData skipped under lock contention, deadlock avoided. Total skips: " + total);
@@ -256,6 +257,11 @@ namespace MaxChunkAgeDeadlockFix
             {
                 stability = pendingStability.Count;
                 grouping = pendingGrouping.Count;
+            }
+
+            if (!Settings.Logging)
+            {
+                return;
             }
 
             if (stability < WarnThreshold && grouping < WarnThreshold)
