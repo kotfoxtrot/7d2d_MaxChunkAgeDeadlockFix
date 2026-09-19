@@ -30,6 +30,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Update="ModInfo.xml" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Config.xml" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Reference Include="Assembly-CSharp">
       <HintPath>$(ManagedDir)/Assembly-CSharp.dll</HintPath>
       <Private>false</Private>
