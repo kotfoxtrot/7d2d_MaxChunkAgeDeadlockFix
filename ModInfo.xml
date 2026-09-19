@@ -2,8 +2,8 @@
 <xml>
   <Name value="MaxChunkAgeDeadlockFix" />
   <DisplayName value="MaxChunkAge Deadlock Fix" />
-  <Description value="Fixes the full server freeze caused by a lock-order deadlock between MultiBlockManager, RegionFileManager and the chunk unload path when MaxChunkAge chunk reset is enabled. Contended locks are taken non-blocking and the work is replayed on the main thread instead of being dropped. Adds chunk reset logging and a main thread watchdog, both switchable in Config.xml with hot reload. See README.md for details." />
+  <Description value="Fixes the full server freeze caused by a lock-order deadlock between MultiBlockManager, RegionFileManager and the chunk unload path when MaxChunkAge chunk reset is enabled. Contended locks are taken non-blocking and the work is replayed on the main thread instead of being dropped. Adds chunk reset logging and a main thread watchdog, both switchable in Config.xml with hot reload. See README.md for details. Built for game version 3.x." />
   <Author value="kotfoxtrot" />
   <Version value="1.5.0" />
-  <Website value="" />
+  <Website value="https://github.com/kotfoxtrot/7d2d_MaxChunkAgeDeadlockFix" />
 </xml>
